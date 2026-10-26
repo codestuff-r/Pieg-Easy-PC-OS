@@ -21,6 +21,8 @@ extern void vga_write(const char *text);
 
 #define ATA_IDENTIFY 0xEC
 #define ATA_READ_PIO 0x20
+#define ATA_WRITE_PIO 0x30
+#define ATA_CACHE_FLUSH 0xE7
 
 static uint32_t disk_sectors;
 
@@ -34,6 +36,11 @@ static inline uint8_t inb(uint16_t port)
     uint8_t value;
     __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
     return value;
+}
+
+static inline void outw(uint16_t port, uint16_t value)
+{
+    __asm__ volatile ("outw %0, %1" :: "a"(value), "Nd"(port));
 }
 
 static inline uint16_t inw(uint16_t port)
@@ -146,6 +153,40 @@ int ata_read_sector(uint32_t lba, uint8_t *buffer)
 
     io_wait();
     return 0;
+}
+
+int ata_write_sector(uint32_t lba, const uint8_t *buffer)
+{
+    if (!buffer || lba >= disk_sectors || lba >= 0x10000000u)
+        return -1;
+
+    if (wait_ready() != 0)
+        return -1;
+
+    outb(ATA_DRIVE, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
+    io_wait();
+
+    outb(ATA_SECCOUNT, 1);
+    outb(ATA_LBA0, (uint8_t)lba);
+    outb(ATA_LBA1, (uint8_t)(lba >> 8));
+    outb(ATA_LBA2, (uint8_t)(lba >> 16));
+    outb(ATA_COMMAND, ATA_WRITE_PIO);
+
+    io_wait();
+
+    if (wait_data() != 0)
+        return -1;
+
+    for (unsigned int i = 0; i < 256; i++) {
+        uint16_t word = (uint16_t)buffer[i * 2]
+                      | ((uint16_t)buffer[i * 2 + 1] << 8);
+        outw(ATA_DATA, word);
+    }
+
+    outb(ATA_COMMAND, ATA_CACHE_FLUSH);
+    io_wait();
+
+    return wait_ready();
 }
 
 uint32_t ata_sector_count(void)

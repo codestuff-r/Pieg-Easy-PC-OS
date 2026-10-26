@@ -14,7 +14,7 @@
 extern void vga_init(void);
 extern void vga_write(const char *text);
 extern void driverinit(void);
-extern void fsinit(void);
+extern void fsinit(uint32_t magic, uint32_t mbi);
 extern void terminal_run(void);
 
 /* RAM specification returned by get_ramspec(). */
@@ -240,7 +240,7 @@ void kernel_main(uint32_t magic, uint32_t mbi_address)
     vga_write("Initializing hardware drivers...\n");
 
     driverinit();
-    fsinit();
+    fsinit(magic, mbi_address);
 
     terminal_run();
 

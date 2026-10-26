@@ -5,6 +5,7 @@
 
 #include "panic.h"
 #include "fsinit.h"
+#include "shellfs.h"
 
 /* ================================================================
  * PIEG SHELL
@@ -15,8 +16,7 @@
 #define TERMINAL_HISTORY_SIZE  16
 #define TERMINAL_ARG_COUNT     16
 #define TERMINAL_NAME          "PIEG Shell"
-#define TERMINAL_VERSION       "0.3"
-#define FAT_ATTR_DIRECTORY     0x10
+#define TERMINAL_VERSION       "0.5"
 
 typedef struct {
     uint64_t total_bytes;
@@ -213,12 +213,9 @@ static char *skip_spaces(char *s)
 
 static void prompt(void)
 {
-    print("pieg");
-
-    if (fs_is_mounted())
-        print("[fs]");
-
-    print(":/ $ ");
+    print("pieg:");
+    print(shellfs_cwd());
+    print(" $ ");
 }
 
 static void redraw_line(const char *s)
@@ -589,103 +586,6 @@ static void show_fastfetch(void)
 }
 
 /* ================================================================
- * FILESYSTEM COMMANDS
- * ================================================================ */
-
-typedef struct {
-    uint64_t files;
-    uint64_t directories;
-    uint64_t bytes;
-} directory_stats_t;
-
-static void list_entry(const char *name,
-                       uint8_t attributes,
-                       uint32_t size,
-                       void *context)
-{
-    directory_stats_t *stats = (directory_stats_t *)context;
-    bool directory = (attributes & FAT_ATTR_DIRECTORY) != 0;
-
-    print(directory ? "[DIR]  " : "[FILE] ");
-    print(name ? name : "(unnamed)");
-
-    if (directory) {
-        ++stats->directories;
-    } else {
-        print("  ");
-        print_u64(size);
-        print(" bytes");
-        ++stats->files;
-        stats->bytes += size;
-    }
-
-    vga_putchar('\n');
-}
-
-static void list_root(void)
-{
-    if (!fs_is_mounted()) {
-        println("No filesystem mounted.");
-        return;
-    }
-
-    directory_stats_t stats = {0};
-
-    println("Root directory");
-    print_repeat('-', 40);
-    vga_putchar('\n');
-
-    fs_list_root(list_entry, &stats);
-
-    vga_putchar('\n');
-    print("Files: ");
-    print_u64(stats.files);
-    print("  Directories: ");
-    print_u64(stats.directories);
-    print("  Bytes: ");
-    print_u64(stats.bytes);
-    vga_putchar('\n');
-}
-
-static void show_mount(void)
-{
-    println("Storage status");
-
-    print("Mounted: ");
-    print_bool(fs_is_mounted());
-    vga_putchar('\n');
-
-    print("Filesystem: ");
-    println(fs_type_name());
-
-    print("Disk sectors: ");
-    print_u64(fs_disk_sectors());
-    vga_putchar('\n');
-}
-
-static void show_df(void)
-{
-    println("Disk usage");
-
-    if (!fs_is_mounted()) {
-        println("No mounted filesystem.");
-        print("Detected disk sectors: ");
-        print_u64(fs_disk_sectors());
-        vga_putchar('\n');
-        return;
-    }
-
-    print("Filesystem: ");
-    println(fs_type_name());
-
-    print("Total sectors: ");
-    print_u64(fs_disk_sectors());
-    vga_putchar('\n');
-
-    println("Free space is not exposed by the current filesystem API.");
-}
-
-/* ================================================================
  * HELP
  * ================================================================ */
 
@@ -700,8 +600,10 @@ static void show_help(const char *category)
 
     if (category &&
         (str_ieq(category, "files") || str_ieq(category, "filesystem"))) {
-        println("ls, dir, pwd, mount, df");
-        println("File read/write operations are not exposed yet.");
+        println("ls, dir, cd, pwd, cat, type, mount, df");
+        println("mkdir, touch, rm, rmdir, del, cp, mv, write, append");
+        println("echo text > file, echo text >> file");
+        println("Layout: /# system, /PROGRAMS, /U/HOME (~ = home).");
         return;
     }
 
@@ -741,9 +643,18 @@ static void show_help(const char *category)
 
     vga_putchar('\n');
     println("Storage:");
-    println("  ls, dir           List root directory");
-    println("  mount             Filesystem status");
-    println("  df                Disk information");
+    println("  ls, dir [path]    List a directory");
+    println("  cd [path]         Change directory (no argument: home)");
+    println("  cat, type <file>  Print a file");
+    println("  mkdir <dir>       Create a directory");
+    println("  touch <file>      Create an empty file");
+    println("  rm, rmdir <path>  Remove a file or empty directory");
+    println("  cp, mv <a> <b>    Copy or move a file");
+    println("  write <f> <text>  Overwrite a file with text");
+    println("  append <f> <text> Append text to a file");
+    println("  echo t > file     Redirect (>> appends)");
+    println("  mount             Devices and filesystem status");
+    println("  df                Volume usage");
 
     vga_putchar('\n');
     println("Diagnostics and power:");
@@ -851,6 +762,9 @@ static void execute_command(const char *line)
     const char *name = cmd.argv[0];
     const char *arg = cmd.argc > 1 ? cmd.argv[1] : "";
 
+    if (shellfs_command(cmd.argc, cmd.argv))
+        return;
+
     if (str_ieq(name, "help") || str_eq(name, "?")) {
         show_help(cmd.argc > 1 ? arg : NULL);
     } else if (str_ieq(name, "echo")) {
@@ -869,8 +783,6 @@ static void execute_command(const char *line)
     } else if (str_ieq(name, "whoami")) {
         println("root");
         println("PIEG user accounts are not implemented yet.");
-    } else if (str_ieq(name, "pwd")) {
-        println("/");
     } else if (str_ieq(name, "exit")) {
         println("The PIEG shell runs inside the kernel.");
         println("There is no parent process to return to.");
@@ -892,18 +804,6 @@ static void execute_command(const char *line)
         show_fastfetch();
     } else if (str_ieq(name, "ram") || str_ieq(name, "free")) {
         show_ram();
-    } else if (str_ieq(name, "ls") || str_ieq(name, "dir")) {
-        if (cmd.argc > 1 &&
-            !str_eq(arg, "/") &&
-            !str_eq(arg, ".")) {
-            println("Only the root directory is supported.");
-        } else {
-            list_root();
-        }
-    } else if (str_ieq(name, "mount")) {
-        show_mount();
-    } else if (str_ieq(name, "df")) {
-        show_df();
     } else if (str_ieq(name, "hex")) {
         uint64_t value;
 
@@ -931,13 +831,6 @@ static void execute_command(const char *line)
     } else if (str_ieq(name, "sudo")) {
         println("PIEG does not implement privilege separation.");
         println("The shell currently executes in kernel context.");
-    } else if (str_ieq(name, "cat") || str_ieq(name, "type") ||
-               str_ieq(name, "less")) {
-        println("File reading is not exposed by the current filesystem API.");
-    } else if (str_ieq(name, "touch") || str_ieq(name, "mkdir") ||
-               str_ieq(name, "rm") || str_ieq(name, "write") ||
-               str_ieq(name, "cp") || str_ieq(name, "mv")) {
-        println("Filesystem modification is not implemented.");
     } else if (str_ieq(name, "ps") || str_ieq(name, "top") ||
                str_ieq(name, "kill")) {
         println("Process management is not exposed by the shell.");
@@ -966,6 +859,7 @@ void terminal_run(void)
     print("Version ");
     println(TERMINAL_VERSION);
     println("Type 'help' for commands.");
+    shellfs_start();
     vga_putchar('\n');
 
     for (;;) {
