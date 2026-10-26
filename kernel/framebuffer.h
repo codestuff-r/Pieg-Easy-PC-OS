@@ -1,4 +1,3 @@
-
 #ifndef PIEG_FRAMEBUFFER_H
 #define PIEG_FRAMEBUFFER_H
 
@@ -34,5 +33,26 @@ void framebuffer_draw_line(
     int y1,
     uint32_t color
 );
+
+/* Converts 0xRRGGBB to the framebuffer's native pixel layout. */
+uint32_t framebuffer_pack_color(uint32_t rgb);
+
+/* Writes `count` native pixels (from framebuffer_pack_color) at (x, y). */
+void framebuffer_write_row(
+    uint32_t x,
+    uint32_t y,
+    const uint32_t *pixels,
+    uint32_t count
+);
+
+/* Copies `rows` pixel rows from src_y to dst_y (dst_y < src_y). */
+void framebuffer_copy_rows(uint32_t dst_y, uint32_t src_y, uint32_t rows);
+
+/*
+ * All drawing goes to a RAM back buffer; nothing is visible until this is
+ * called. It copies only the changed area to video memory and is a cheap
+ * no-op when nothing changed, so calling it often is fine.
+ */
+void framebuffer_flush(void);
 
 #endif

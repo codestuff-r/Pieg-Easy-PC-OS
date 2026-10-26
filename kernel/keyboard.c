@@ -1,10 +1,16 @@
-
 #include <stdint.h>
+
+extern void framebuffer_flush(void);
 
 #define KEYBOARD_DATA_PORT   0x60
 #define KEYBOARD_STATUS_PORT 0x64
 
 static int shift_pressed;
+static int ctrl_pressed;
+static int extended_scancode;
+
+#define KEY_SCROLL_UP   ((char)0x80)
+#define KEY_SCROLL_DOWN ((char)0x81)
 
 static const char keymap[128] = {
     [0x02] = '1', [0x03] = '2', [0x04] = '3',
@@ -59,14 +65,59 @@ static inline uint8_t inb(uint16_t port)
 void keyboard_init(void)
 {
     shift_pressed = 0;
+    ctrl_pressed = 0;
+    extended_scancode = 0;
 }
 
 char keyboard_getchar(void)
 {
-    if (!(inb(KEYBOARD_STATUS_PORT) & 1))
+    /* Idle: put everything drawn so far on screen (cheap if nothing is dirty). */
+    if (!(inb(KEYBOARD_STATUS_PORT) & 1)) {
+        framebuffer_flush();
         return 0;
+    }
 
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
+
+    /* Set-1 extended-key prefix. */
+    if (scancode == 0xE0) {
+        extended_scancode = 1;
+        return 0;
+    }
+
+    if (extended_scancode) {
+        extended_scancode = 0;
+
+        /* Right or left Ctrl uses the extended/non-extended 0x1D code. */
+        if (scancode == 0x1D) {
+            ctrl_pressed = 1;
+            return 0;
+        }
+        if (scancode == 0x9D) {
+            ctrl_pressed = 0;
+            return 0;
+        }
+
+        /* Ctrl + Up/Down scrolls the terminal viewport. */
+        if (!(scancode & 0x80) && ctrl_pressed) {
+            if (scancode == 0x48)
+                return KEY_SCROLL_UP;
+            if (scancode == 0x50)
+                return KEY_SCROLL_DOWN;
+        }
+
+        /* Ignore other extended keys. */
+        return 0;
+    }
+
+    if (scancode == 0x1D) {
+        ctrl_pressed = 1;
+        return 0;
+    }
+    if (scancode == 0x9D) {
+        ctrl_pressed = 0;
+        return 0;
+    }
 
     if (scancode == 0x2A || scancode == 0x36) {
         shift_pressed = 1;
@@ -84,6 +135,16 @@ char keyboard_getchar(void)
 
     if (scancode >= 128)
         return 0;
+
+    /* Ctrl+letter produces the control code (Ctrl+C = 3, Ctrl+U = 21, ...). */
+    if (ctrl_pressed) {
+        char base = keymap[scancode];
+
+        if (base >= 'a' && base <= 'z')
+            return (char)(base - 'a' + 1);
+
+        return 0;
+    }
 
     return shift_pressed
         ? shifted_keymap[scancode]

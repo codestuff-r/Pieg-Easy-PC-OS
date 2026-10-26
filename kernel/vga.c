@@ -2,14 +2,25 @@
 #include <stdint.h>
 #include "framebuffer.h"
 
-#define VGA_WIDTH  80
-#define VGA_HEIGHT 25
+#define VGA_WIDTH       80
+#define VGA_HEIGHT      25
+#define SCROLLBACK_LINES 512
+#define MAX_CELL_WIDTH  256
 
+/*
+ * Logical rows are stored in a ring. The visible screen is only a viewport
+ * into this buffer, so old output remains available while scrolling.
+ *
+ * Drawing is incremental: a character repaints only its own cell, a new
+ * line at the bottom scrolls the framebuffer by one cell row, and a full
+ * repaint happens only when the user has scrolled the view back.
+ */
 static size_t cursor_row;
 static size_t cursor_col;
+static size_t view_offset;
 static uint8_t text_color = 0x07;
 
-static char text_buffer[VGA_HEIGHT][VGA_WIDTH];
+static char text_buffer[SCROLLBACK_LINES][VGA_WIDTH];
 
 static const uint8_t palette[16][3] = {
     { 0,   0,   0   }, { 0,   0,   170 },
@@ -113,7 +124,13 @@ static uint32_t color_rgb(uint8_t index)
 static uint32_t cell_width(void)
 {
     uint32_t w = framebuffer_width() / VGA_WIDTH;
-    return w ? w : 1;
+
+    if (w == 0)
+        w = 1;
+    if (w > MAX_CELL_WIDTH)
+        w = MAX_CELL_WIDTH;
+
+    return w;
 }
 
 static uint32_t cell_height(void)
@@ -123,9 +140,8 @@ static uint32_t cell_height(void)
 }
 
 /*
- * Draws one character cell. The 5x7 glyph is scaled in whole blocks
- * (bw x bh pixels per font pixel) so a cell costs at most ~36 rectangle
- * fills instead of one call per screen pixel.
+ * Draws one character cell. Each glyph row is built once into a pixel line
+ * and blitted bh times, so every pixel of the cell is written exactly once.
  */
 static void render_cell(size_t row, size_t col, uint8_t chval, uint8_t attr)
 {
@@ -141,13 +157,15 @@ static void render_cell(size_t row, size_t col, uint8_t chval, uint8_t attr)
     if (chval < 32 || chval > 126)
         chval = '?';
 
-    uint32_t foreground = color_rgb(attr & 0x0F);
-    uint32_t background = color_rgb((attr >> 4) & 0x0F);
+    uint32_t bg_rgb = color_rgb((attr >> 4) & 0x0F);
 
-    framebuffer_fill_rect(x0, y0, cw, ch, background);
-
-    if (chval == ' ')
+    if (chval == ' ') {
+        framebuffer_fill_rect(x0, y0, cw, ch, bg_rgb);
         return;
+    }
+
+    uint32_t foreground = framebuffer_pack_color(color_rgb(attr & 0x0F));
+    uint32_t background = framebuffer_pack_color(bg_rgb);
 
     uint32_t bw = cw / 6;           /* 5 columns + spacing */
     uint32_t bh = ch / 8;           /* 7 rows + spacing */
@@ -158,76 +176,187 @@ static void render_cell(size_t row, size_t col, uint8_t chval, uint8_t attr)
     uint32_t oy = (ch > 7 * bh) ? (ch - 7 * bh) / 2 : 0;
 
     const uint8_t *glyph = font5x7[chval - 32];
+    uint32_t line[MAX_CELL_WIDTH];
 
-    for (uint32_t gx = 0; gx < 5; gx++) {
-        for (uint32_t gy = 0; gy < 7; gy++) {
-            if (glyph[gx] & (1u << gy))
-                framebuffer_fill_rect(x0 + ox + gx * bw,
-                                      y0 + oy + gy * bh,
-                                      bw, bh, foreground);
+    if (oy)
+        framebuffer_fill_rect(x0, y0, cw, oy < ch ? oy : ch, bg_rgb);
+
+    uint32_t y = oy;
+
+    for (uint32_t gy = 0; gy < 7 && y < ch; gy++) {
+        for (uint32_t i = 0; i < cw; i++)
+            line[i] = background;
+
+        for (uint32_t gx = 0; gx < 5; gx++) {
+            if (!(glyph[gx] & (1u << gy)))
+                continue;
+
+            for (uint32_t k = 0; k < bw; k++) {
+                uint32_t px = ox + gx * bw + k;
+
+                if (px < cw)
+                    line[px] = foreground;
+            }
         }
+
+        for (uint32_t k = 0; k < bh && y < ch; k++, y++)
+            framebuffer_write_row(x0, y0 + y, line, cw);
     }
+
+    if (y < ch)
+        framebuffer_fill_rect(x0, y0 + y, cw, ch - y, bg_rgb);
 }
 
-static void draw_cell(size_t row, size_t col)
+static size_t oldest_row(void)
 {
-    if (row >= VGA_HEIGHT || col >= VGA_WIDTH)
+    return cursor_row >= SCROLLBACK_LINES - 1
+        ? cursor_row - (SCROLLBACK_LINES - 1)
+        : 0;
+}
+
+static size_t visible_top_row(void)
+{
+    size_t top = cursor_row >= VGA_HEIGHT - 1
+        ? cursor_row - (VGA_HEIGHT - 1)
+        : 0;
+    size_t oldest = oldest_row();
+
+    if (view_offset > top)
+        return oldest;
+
+    size_t visible_top = top - view_offset;
+    return visible_top < oldest ? oldest : visible_top;
+}
+
+static void draw_cell(size_t logical_row, size_t col)
+{
+    if (col >= VGA_WIDTH)
         return;
 
-    render_cell(row, col, (uint8_t)text_buffer[row][col], text_color);
+    size_t top = visible_top_row();
+    if (logical_row < top || logical_row >= top + VGA_HEIGHT)
+        return;
+
+    size_t screen_row = logical_row - top;
+    render_cell(screen_row, col,
+                (uint8_t)text_buffer[logical_row % SCROLLBACK_LINES][col],
+                text_color);
 }
 
 /* Used by panic.c: draw with an explicit attribute, bypassing the text buffer. */
 void vga_raw_put(uint32_t col, uint32_t row, char c, uint8_t attr)
 {
     render_cell(row, col, (uint8_t)c, attr);
+    framebuffer_flush();            /* the panic path must show immediately */
 }
 
 void vga_raw_clear(uint8_t attr)
 {
-    if (framebuffer_is_available())
+    if (framebuffer_is_available()) {
         framebuffer_clear(color_rgb((attr >> 4) & 0x0F));
+        framebuffer_flush();
+    }
 }
 
+/* Repaints the viewport. Runs of blanks are filled as single rectangles. */
 static void redraw_screen(void)
 {
     if (!framebuffer_is_available())
         return;
 
-    framebuffer_clear(color_rgb((text_color >> 4) & 0x0F));
+    uint32_t cw = cell_width();
+    uint32_t ch = cell_height();
+    uint32_t bg = color_rgb((text_color >> 4) & 0x0F);
+    size_t top = visible_top_row();
+    size_t oldest = oldest_row();
 
-    for (size_t row = 0; row < VGA_HEIGHT; row++)
-        for (size_t col = 0; col < VGA_WIDTH; col++)
-            draw_cell(row, col);
+    for (size_t screen_row = 0; screen_row < VGA_HEIGHT; ++screen_row) {
+        size_t logical_row = top + screen_row;
+        const char *line = 0;
+
+        if (logical_row >= oldest && logical_row <= cursor_row)
+            line = text_buffer[logical_row % SCROLLBACK_LINES];
+
+        size_t col = 0;
+
+        while (col < VGA_WIDTH) {
+            if (!line || line[col] == ' ') {
+                size_t start = col;
+
+                while (col < VGA_WIDTH && (!line || line[col] == ' '))
+                    col++;
+
+                framebuffer_fill_rect((uint32_t)start * cw,
+                                      (uint32_t)screen_row * ch,
+                                      (uint32_t)(col - start) * cw,
+                                      ch, bg);
+            } else {
+                render_cell(screen_row, col, (uint8_t)line[col],
+                            text_color);
+                col++;
+            }
+        }
+    }
 }
 
 static void scroll_if_needed(void)
 {
-    if (cursor_row < VGA_HEIGHT)
-        return;
-
-    for (size_t row = 1; row < VGA_HEIGHT; row++)
-        for (size_t col = 0; col < VGA_WIDTH; col++)
-            text_buffer[row - 1][col] = text_buffer[row][col];
-
-    for (size_t col = 0; col < VGA_WIDTH; col++)
-        text_buffer[VGA_HEIGHT - 1][col] = ' ';
-
-    cursor_row = VGA_HEIGHT - 1;
-    redraw_screen();
+    /* Keep the cursor row valid in the circular history. */
+    if (cursor_row >= SCROLLBACK_LINES) {
+        size_t top = cursor_row >= VGA_HEIGHT - 1
+            ? cursor_row - (VGA_HEIGHT - 1)
+            : 0;
+        size_t oldest = oldest_row();
+        size_t maximum_offset = top > oldest ? top - oldest : 0;
+        if (view_offset > maximum_offset)
+            view_offset = maximum_offset;
+    }
 }
 
-void vga_putchar(char c)
+/* Shifts the live screen up one cell row; the new bottom row is blank. */
+static void scroll_screen_one_line(void)
+{
+    uint32_t ch = cell_height();
+
+    framebuffer_copy_rows(0, ch, (VGA_HEIGHT - 1) * ch);
+    framebuffer_fill_rect(0, (VGA_HEIGHT - 1) * ch, framebuffer_width(), ch,
+                          color_rgb((text_color >> 4) & 0x0F));
+}
+
+static void new_line(bool *full)
+{
+    cursor_col = 0;
+    cursor_row++;
+
+    for (size_t col = 0; col < VGA_WIDTH; ++col)
+        text_buffer[cursor_row % SCROLLBACK_LINES][col] = ' ';
+
+    if (*full)
+        return;
+
+    if (cursor_row >= VGA_HEIGHT)
+        scroll_screen_one_line();
+}
+
+/*
+ * Draws into the back buffer only. Nothing reaches video memory until
+ * framebuffer_flush(): vga_write() flushes once per string, the keyboard poll
+ * flushes whenever it finds no key waiting, and scrolling/clearing flush.
+ */
+static void put_one(char c)
 {
     if (!framebuffer_is_available())
         return;
 
+    bool full = view_offset != 0;
+
     if (c == '\n') {
-        cursor_col = 0;
-        cursor_row++;
+        new_line(&full);
     } else if (c == '\r') {
         cursor_col = 0;
     } else if (c == '\b') {
+        size_t top_before = visible_top_row();
+
         if (cursor_col > 0) {
             cursor_col--;
         } else if (cursor_row > 0) {
@@ -235,32 +364,77 @@ void vga_putchar(char c)
             cursor_col = VGA_WIDTH - 1;
         }
 
-        text_buffer[cursor_row][cursor_col] = ' ';
-        draw_cell(cursor_row, cursor_col);
+        text_buffer[cursor_row % SCROLLBACK_LINES][cursor_col] = ' ';
+
+        if (!full) {
+            if (visible_top_row() != top_before)
+                full = true;
+            else
+                draw_cell(cursor_row, cursor_col);
+        }
     } else if (c == '\t') {
         size_t spaces = 4 - (cursor_col % 4);
 
         while (spaces--) {
-            text_buffer[cursor_row][cursor_col] = ' ';
-            draw_cell(cursor_row, cursor_col);
+            text_buffer[cursor_row % SCROLLBACK_LINES][cursor_col] = ' ';
 
-            if (++cursor_col >= VGA_WIDTH) {
-                cursor_col = 0;
-                cursor_row++;
-                scroll_if_needed();
-            }
+            if (!full)
+                draw_cell(cursor_row, cursor_col);
+
+            if (++cursor_col >= VGA_WIDTH)
+                new_line(&full);
         }
     } else {
-        text_buffer[cursor_row][cursor_col] = c;
-        draw_cell(cursor_row, cursor_col);
+        text_buffer[cursor_row % SCROLLBACK_LINES][cursor_col] = c;
 
-        if (++cursor_col >= VGA_WIDTH) {
-            cursor_col = 0;
-            cursor_row++;
-        }
+        if (!full)
+            draw_cell(cursor_row, cursor_col);
+
+        if (++cursor_col >= VGA_WIDTH)
+            new_line(&full);
     }
 
     scroll_if_needed();
+
+    if (full)
+        redraw_screen();
+}
+
+void vga_putchar(char c)
+{
+    put_one(c);
+}
+
+/*
+ * direction < 0: scroll up; direction > 0: scroll down; direction == 0:
+ * return to the live bottom so keyboard input appears beside the prompt.
+ */
+void vga_scroll_view(int direction)
+{
+    if (direction == 0 && view_offset == 0)
+        return;
+
+    size_t top = cursor_row >= VGA_HEIGHT - 1
+        ? cursor_row - (VGA_HEIGHT - 1)
+        : 0;
+    size_t oldest = oldest_row();
+    size_t maximum_offset = top > oldest ? top - oldest : 0;
+
+    if (direction < 0) {
+        if (view_offset < maximum_offset) {
+            size_t amount = (size_t)(-direction);
+            view_offset = view_offset + amount > maximum_offset
+                ? maximum_offset : view_offset + amount;
+        }
+    } else if (direction > 0) {
+        size_t amount = (size_t)direction;
+        view_offset = view_offset > amount ? view_offset - amount : 0;
+    } else {
+        view_offset = 0;
+    }
+
+    redraw_screen();
+    framebuffer_flush();
 }
 
 void vga_putc(char c)
@@ -279,7 +453,9 @@ void vga_write(const char *s)
         return;
 
     while (*s)
-        vga_putchar(*s++);
+        put_one(*s++);
+
+    framebuffer_flush();
 }
 
 void vga_print(const char *s)
@@ -296,12 +472,18 @@ void vga_clear(void)
 {
     cursor_row = 0;
     cursor_col = 0;
+    view_offset = 0;
 
-    for (size_t row = 0; row < VGA_HEIGHT; row++)
-        for (size_t col = 0; col < VGA_WIDTH; col++)
+    for (size_t row = 0; row < SCROLLBACK_LINES; ++row)
+        for (size_t col = 0; col < VGA_WIDTH; ++col)
             text_buffer[row][col] = ' ';
 
-    redraw_screen();
+    /* Clears the margins outside the 80x25 cell grid as well. The buffer is
+     * all blanks, so a separate repaint of the grid would only redo this. */
+    if (framebuffer_is_available()) {
+        framebuffer_clear(color_rgb((text_color >> 4) & 0x0F));
+        framebuffer_flush();
+    }
 }
 
 void vga_set_color(uint8_t foreground, uint8_t background)

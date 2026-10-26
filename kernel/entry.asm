@@ -262,6 +262,9 @@ section .bss
 align 4096
 
 ; These four must stay contiguous and in this order (zeroed as one block).
+; pd_table is exported so framebuffer.c can mark the framebuffer's 2 MiB
+; pages write-combining (PAT bit) once it knows where the framebuffer is.
+global pd_table
 pml4_table:     resb 4096
 pdpt_table:     resb 4096
 pd_table:       resb 4096 * 4
