@@ -9,6 +9,7 @@
 #include "mem.h"
 #include "panic.h"
 #include "pci.h"
+#include "persist.h"
 #include "program.h"
 #include "ramspec.h"
 #include "shellfs.h"
@@ -234,6 +235,33 @@ static int api_pci_info(unsigned int index, pieg_pciinfo_t *info)
     return 1;
 }
 
+static unsigned int api_disk_count(void)
+{
+    return persist_disk_count();
+}
+
+static int api_disk_info(unsigned int index, pieg_diskinfo_t *info)
+{
+    persist_disk_t d;
+
+    if (!info || !persist_disk_info(index, &d))
+        return 0;
+
+    memset(info, 0, sizeof(*info));
+
+    copy_str(info->name, d.name, sizeof(info->name));
+    info->bytes = d.sectors * 512u;
+    info->state = d.state;
+    info->free_bytes = d.free_sectors * 512u;
+
+    return 1;
+}
+
+static const char *api_disk_install(unsigned int index, uint32_t size_mib)
+{
+    return persist_install(index, size_mib);
+}
+
 __attribute__((noreturn))
 static void api_panic(const char *reason, const char *details)
 {
@@ -310,6 +338,10 @@ static const pieg_api_t api = {
 
     .pci_count = api_pci_count,
     .pci_info = api_pci_info,
+
+    .disk_count = api_disk_count,
+    .disk_info = api_disk_info,
+    .disk_install = api_disk_install,
 };
 
 /* ================================================================

@@ -799,7 +799,7 @@ int main(int argc, char **argv)
     if (IS("ver") || IS("version"))
         return cmd_ver();
     if (IS("uname")) {
-        p_putln("PIEG pieg 0.5 x86_64 Multiboot2");
+        p_putln("PIEG pieg 0.7 x86_64 Multiboot2");
         return 0;
     }
     if (IS("hostname")) {

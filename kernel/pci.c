@@ -35,6 +35,20 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t device,
     return inl(PCI_CONFIG_DATA);
 }
 
+void pci_config_write32(uint8_t bus, uint8_t device, uint8_t function,
+                        uint8_t offset, uint32_t value)
+{
+    uint32_t address =
+        0x80000000u |
+        ((uint32_t)bus << 16) |
+        ((uint32_t)device << 11) |
+        ((uint32_t)function << 8) |
+        (offset & 0xFC);
+
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
+}
+
 uint16_t pci_config_read16(uint8_t bus, uint8_t device,
                            uint8_t function, uint8_t offset)
 {

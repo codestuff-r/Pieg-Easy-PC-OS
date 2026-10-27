@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define BLOCKDEV_MAX_DEVICES 16
+#define BLOCKDEV_MAX_DEVICES 32
 #define BLOCKDEV_SECTOR_SIZE 512
 
 typedef struct blockdev {

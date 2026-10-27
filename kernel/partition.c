@@ -71,6 +71,29 @@ static bool add_partition(partition_t *out, unsigned int *count,
     return true;
 }
 
+void partition_make(partition_t *p, blockdev_t *parent, uint64_t start,
+                    uint64_t sectors, const char *name)
+{
+    unsigned int n = 0;
+
+    memset(p, 0, sizeof(*p));
+
+    while (name[n] && n < sizeof(p->name) - 1) {
+        p->name[n] = name[n];
+        n++;
+    }
+
+    p->parent = parent;
+    p->start = start;
+
+    p->dev.name = p->name;
+    p->dev.sector_count = sectors;
+    p->dev.sector_size = parent->sector_size;
+    p->dev.driver_data = p;
+    p->dev.read = part_read;
+    p->dev.write = parent->write ? part_write : 0;
+}
+
 static void scan_gpt(blockdev_t *parent, partition_t *out,
                      unsigned int *count, unsigned int max)
 {

@@ -18,7 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PIEG_API_VERSION    2
+#define PIEG_API_VERSION    3
 #define PIEG_ATTR_DIRECTORY 0x10
 
 typedef void (*pieg_list_cb)(const char *name, uint8_t attributes,
@@ -63,6 +63,13 @@ typedef struct {
     uint32_t bar[6];            /* raw BAR registers, 0 when absent */
 } pieg_pciinfo_t;
 
+typedef struct {
+    char name[16];
+    uint64_t bytes;
+    int state;                  /* 0 = unsupported, 1 = blank, 2 = valid GPT */
+    uint64_t free_bytes;        /* space a new PIEG volume could use */
+} pieg_diskinfo_t;
+
 typedef struct pieg_api {
     uint32_t version;
     const char *shell_version;
@@ -105,6 +112,16 @@ typedef struct pieg_api {
     /* Added in API version 2 (programs built for version 1 never touch these). */
     unsigned int (*pci_count)(void);
     int (*pci_info)(unsigned int index, pieg_pciinfo_t *info);
+
+    /*
+     * Added in API version 3: persistent storage. Disks are the physical
+     * ATA/SATA disks seen at boot. disk_install() creates a PIEG volume in
+     * free space (size_mib 0 = all of it, at most 4 GiB), copies the
+     * running system onto it and returns NULL, or an error message.
+     */
+    unsigned int (*disk_count)(void);
+    int (*disk_info)(unsigned int index, pieg_diskinfo_t *info);
+    const char *(*disk_install)(unsigned int index, uint32_t size_mib);
 } pieg_api_t;
 
 #endif

@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "ahci.h"
 #include "ata.h"
 #include "blockdev.h"
 #include "fat.h"
@@ -15,6 +16,11 @@ extern void vga_write(const char *text);
 static blockdev_t ata_device;
 static partition_t partitions[PARTITION_MAX];
 static unsigned int partition_count;
+
+#define FS_DISK_MAX 8
+
+static blockdev_t *disk_list[FS_DISK_MAX];
+static unsigned int disk_total;
 
 static fat_fs_t root_fs;
 static bool filesystem_mounted;
@@ -154,6 +160,31 @@ static void ensure_layout(void)
     ensure_dir(PIEG_DIR_HOME);
 }
 
+/* Registers a whole disk, then every partition found on it. */
+static void add_disk(blockdev_t *dev)
+{
+    if (!blockdev_register(dev))
+        return;
+
+    if (disk_total < FS_DISK_MAX)
+        disk_list[disk_total++] = dev;
+
+    unsigned int first = partition_count;
+
+    partition_count += partition_scan(dev, &partitions[partition_count],
+                                      PARTITION_MAX - partition_count);
+
+    for (unsigned int i = first; i < partition_count; i++) {
+        blockdev_register(&partitions[i].dev);
+
+        vga_write("[FS] ");
+        vga_write(partitions[i].name);
+        vga_write(": partition, ");
+        print_u32((uint32_t)(partitions[i].dev.sector_count / 2048));
+        vga_write(" MiB\n");
+    }
+}
+
 void fsinit(uint32_t magic, uint32_t mbi)
 {
     static fat_fs_t scratch;
@@ -173,21 +204,11 @@ void fsinit(uint32_t magic, uint32_t mbi)
         ata_device.read = ata_block_read;
         ata_device.write = ata_block_write;
 
-        if (blockdev_register(&ata_device)) {
-            partition_count = partition_scan(&ata_device, partitions,
-                                             PARTITION_MAX);
-
-            for (unsigned int i = 0; i < partition_count; i++) {
-                blockdev_register(&partitions[i].dev);
-
-                vga_write("[FS] ");
-                vga_write(partitions[i].name);
-                vga_write(": partition, ");
-                print_u32((uint32_t)(partitions[i].dev.sector_count / 2048));
-                vga_write(" MiB\n");
-            }
-        }
+        add_disk(&ata_device);
     }
+
+    for (unsigned int i = 0; i < ahci_disk_count(); i++)
+        add_disk(ahci_disk_get(i));
 
     /*
      * Registration order is ramdisk, disk, partitions. Scanning backwards
@@ -247,6 +268,21 @@ void fsinit(uint32_t magic, uint32_t mbi)
 /* ================================================================
  * Queries
  * ================================================================ */
+
+unsigned int fs_disk_count(void)
+{
+    return disk_total;
+}
+
+blockdev_t *fs_disk_get(unsigned int index)
+{
+    return index < disk_total ? disk_list[index] : 0;
+}
+
+fat_fs_t *fs_root(void)
+{
+    return filesystem_mounted ? &root_fs : 0;
+}
 
 bool fs_is_mounted(void)
 {

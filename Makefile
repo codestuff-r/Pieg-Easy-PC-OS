@@ -25,6 +25,10 @@ C_SOURCES := \
 	kernel/exceptions.c \
 	kernel/pci.c \
 	kernel/ata.c \
+	kernel/ahci.c \
+	kernel/gpt.c \
+	kernel/mkfat.c \
+	kernel/persist.c \
 	kernel/mem.c \
 	kernel/ramdisk.c \
 	kernel/partition.c \
@@ -51,7 +55,7 @@ FS_IMG := $(BUILD)/pieg-fs.img
 DISK_IMG := $(BUILD)/pieg-disk.img
 DISK_PART_OFFSET := 1048576
 
-.PHONY: all clean iso iso-uefi iso-legacy run run-live disk disk-reset fsimg check-tools programs install-programs
+.PHONY: host-test run-uefi all clean iso iso-uefi iso-legacy run run-live disk disk-reset fsimg check-tools programs install-programs
 
 all: $(BUILD)/pieg.elf
 
@@ -165,6 +169,31 @@ run: iso-legacy disk install-programs
 				-monitor stdio ;; \
 		*) echo "Cancelled."; exit 0 ;; \
 	esac
+
+# ---- UEFI + SATA test: OVMF firmware, blank 2 GiB disk on the q35 AHCI ----
+SATA_IMG := $(BUILD)/pieg-sata.img
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+
+$(SATA_IMG): | $(BUILD)
+	truncate -s 2G $@
+
+# Boot the UEFI ISO with a blank SATA disk, then run `install sd0` in PIEG.
+# The disk keeps its data between runs (delete build/pieg-sata.img to reset).
+run-uefi: iso-uefi $(SATA_IMG)
+	@test -f $(BUILD)/OVMF_VARS.fd || cp $(OVMF_VARS) $(BUILD)/OVMF_VARS.fd
+	qemu-system-x86_64 -machine q35 -m 512M -no-reboot -no-shutdown \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
+		-drive file=$(SATA_IMG),format=raw,if=ide,index=0 \
+		-cdrom $(BUILD)/pieg-uefi.iso -boot d -monitor stdio
+
+# Host-side unit test for the GPT editor, FAT32 formatter and installer.
+host-test: | $(BUILD)
+	gcc -std=gnu11 -g -O1 -fsanitize=address,undefined -Wall -Wextra -Ikernel \
+		tests/hosttest.c kernel/gpt.c kernel/mkfat.c kernel/fat.c \
+		kernel/blockdev.c kernel/partition.c kernel/persist.c -o $(BUILD)/hosttest
+	$(BUILD)/hosttest
 
 clean:
 	rm -f $(BUILD)/*.o \

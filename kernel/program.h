@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#define PIEG_SHELL_VERSION "0.6"
+#define PIEG_SHELL_VERSION "0.7"
 
 /*
  * Runs argv[0] as a program from /PROGRAMS (or by path when it contains a

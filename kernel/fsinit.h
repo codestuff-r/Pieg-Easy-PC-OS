@@ -24,6 +24,11 @@
 
 void fsinit(uint32_t multiboot_magic, uint32_t multiboot_info);
 
+/* Whole physical disks (ATA/SATA) seen at boot, and the mounted volume. */
+unsigned int fs_disk_count(void);
+blockdev_t *fs_disk_get(unsigned int index);
+fat_fs_t *fs_root(void);
+
 bool fs_is_mounted(void);
 bool fs_is_writable(void);
 bool fs_is_pieg_volume(void);
